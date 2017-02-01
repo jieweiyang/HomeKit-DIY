@@ -45,6 +45,8 @@ String strTopicFrSet = "homebridge/from/set";
 String strSwitch = "LightBulb";
 
 // Other useful global var.
+unsigned long time_interval, time_check;
+unsigned long time_interval_pub, time_check_pub;
 unsigned long buttonHold = 0;
 int buttonState = 0;
 int buttonState_pre = 0;
@@ -128,7 +130,8 @@ void setup() {
   */
   Serial.println(strSwitch + "_" + strClientMAC);
 
-  ticPublish.attach_ms(INTERVAL_PUBLISH, ticCallPublish);
+  time_interval_pub = INTERVAL_PUBLISH;
+  time_interval = INTERVAL_KEEPALIVE;
 }
 
 void loop() {
@@ -136,9 +139,21 @@ void loop() {
     WiFiConnect();
   }
 
-  if (!mqttClient.connected()) {
-    Serial.println("Disconnected");
-    mqttConnect();
+  // Interval for KEEPALIVE and READY
+  if ((millis() - time_check) > time_interval) {
+    time_check = millis();
+    if (!mqttClient.connected()) {
+      Serial.println("Disconnected");
+      mqttConnect();
+    }
+  }
+
+  // Interval for publish
+  if ((millis() - time_check_pub) > time_interval_pub) {
+    time_check_pub = millis();
+    LED_status.off();
+
+    LED_status.on();
   }
 
   buttonState = Button_press.status();
@@ -220,9 +235,6 @@ void ticCallLED()
 }
 
 
-void ticCallPublish() {
-
-}
 
 /*
    MQTT functions
