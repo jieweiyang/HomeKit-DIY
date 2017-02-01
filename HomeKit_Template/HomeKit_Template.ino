@@ -1,8 +1,17 @@
 
+
+//Mandatory Library
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <ESP8266WiFi.h>
 #include "Common.h"
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager
+#include <Ticker.h>
+
+//Device specified Library
+
 
 
 /* User define section
@@ -13,12 +22,17 @@ IPAddress server(192, 168, 1, 50);
 //Name of Mixture
 String strClientName = "ESP8266";
 
+
+#define pinLED 2
+#define pinButton 3
+#define pinGPIO 0
+
 /*
    Most of the time, no need to touch below settings.
 */
 
 //Var for interval timmer
-#define INTERVAL_IDLE 500
+#define INTERVAL_KEEPALIVE 500
 #define INTERVAL_PUBLISH 5000
 
 //MQTT Topics
@@ -31,25 +45,23 @@ String strTopicFrSet = "homebridge/from/set";
 String strSwitch = "LightBulb";
 
 // Other useful global var.
-unsigned long timer_idle, timer_pub;
-//unsigned long time_interval_pub, time_interval;
 unsigned long buttonHold = 0;
 int buttonState = 0;
 int buttonState_pre = 0;
 String strClientMAC;
 
 
+
 // ========== General Initial settings
 
-LED LED_status(2);        // GPIO 2, LED pin, invert with ESP8266 onboard LED.
-BUTTON Button_press(3);   // GPIO 3, using RX pin, required  SERIAL_TX_ONLY Only.
-
-//#define PIXEL_PIN 0     // GPIO 0, FastLED IO.
-
+LED LED_status(pinLED);        // GPIO 2, LED pin, invert with ESP8266 onboard LED.
+BUTTON Button_press(pinButton);   // GPIO 3, using RX pin, required  SERIAL_TX_ONLY Only.
 
 // Initialize the Ethernet client object
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+Ticker ticLED;
+Ticker ticPublish;
 
 
 // =========== Main Program===========
@@ -59,16 +71,44 @@ void setup() {
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
 
   WiFi.begin();
-  WiFi.printDiag(Serial);
-  Serial.setDebugOutput(true);
+  //WiFi.printDiag(Serial);
+  //Serial.setDebugOutput(true);
 
   LED_status.on();
 
-  if (Button_press.status() == LOW ) {
-    WiFi.disconnect();
-    WiFi.beginSmartConfig();
+  ticLED.attach(0.6, ticCallLED);
+  WiFiManager wifiManager;
+
+  //reset settings - if button pressed
+  if (Button_press.status() == LOW  ) {
+    wifiManager.resetSettings();
     Serial.println("Call SmartConfig");
   }
+
+  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
+  wifiManager.setAPCallback(configModeCallback);
+
+  //sets timeout until configuration portal gets turned off
+  //useful to make it all retry or go to sleep
+  //in seconds
+  wifiManager.setTimeout(180);
+
+  //fetches ssid and pass and tries to connect
+  //if it does not connect it starts an access point with the specified name
+  //here  "AutoConnectAP"
+  //and goes into a blocking loop awaiting configuration
+  if (!wifiManager.autoConnect()) {
+    Serial.println("failed to connect and hit timeout");
+    //reset and try again, or maybe put it to deep sleep
+    ESP.reset();
+    delay(1000);
+  }
+
+  //if you get here you have connected to the WiFi
+  Serial.println("connected...yeey :)");
+  ticLED.detach();
+  //keep LED on
+  LED_status.on();
 
   byte mac[6];
   WiFi.macAddress(mac);
@@ -88,6 +128,7 @@ void setup() {
   */
   Serial.println(strSwitch + "_" + strClientMAC);
 
+  ticPublish.attach_ms(INTERVAL_PUBLISH, ticCallPublish);
 }
 
 void loop() {
@@ -95,18 +136,9 @@ void loop() {
     WiFiConnect();
   }
 
-  // Interval for KEEPALIVE and READY
-  if ((millis() - timer_idle) > INTERVAL_IDLE) {
-    timer_idle = millis();
-    if (!mqttClient.connected()) {
-      Serial.println("Disconnected");
-      mqttConnect();
-    }
-  }
-
-  // Interval for publish
-  if ((millis() - timer_pub) > INTERVAL_PUBLISH) {
-    timer_pub = millis();
+  if (!mqttClient.connected()) {
+    Serial.println("Disconnected");
+    mqttConnect();
   }
 
   buttonState = Button_press.status();
@@ -131,6 +163,7 @@ void loop() {
     }
   */
   if (buttonState == HIGH && buttonState_pre == 1) {  // Button Release
+    Serial.println("ButtonRelease");
     LED_status.on();
     buttonState_pre = 0;
     buttonHold = 0;
@@ -138,6 +171,66 @@ void loop() {
 
   mqttClient.loop();
 }
+
+/*
+   General Functions
+
+*/
+
+void WiFiConnect() {
+  ticLED.attach(0.6, ticCallLED);
+  Serial.println();
+  Serial.println("Waitting to connect...");
+  while ( WiFi.status() != WL_CONNECTED)  {
+    //LED_status.blink(3);
+    Serial.print(".");
+    delay(1000);
+
+  }
+  Serial.println();
+  Serial.println("You're connected to the network");
+  ticLED.detach();
+  //keep LED on
+  LED_status.on();
+}
+
+//gets called when WiFiManager enters configuration mode
+void configModeCallback (WiFiManager *myWiFiManager) {
+
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+  //entered config mode, make led toggle faster
+  ticLED.attach(0.2, ticCallLED);
+}
+
+
+/*
+   Ticker Functions, based on interrupt.
+
+   Blocking function prohibted.
+   e.g. delay();
+*/
+void ticCallLED()
+{
+  //toggle state
+  int state = digitalRead(pinLED);  // get the current state of GPIO1 pin
+  digitalWrite(pinLED, !state);     // set pin to the opposite state
+}
+
+
+void ticCallPublish() {
+
+}
+
+/*
+   MQTT functions
+
+   mqttConnect() - MQTT server connect, client registery, accessory registery.
+   callback() - Processing MQTT message from server broadcast.
+
+*/
 
 void mqttConnect() {
   // Loop until we're reconnected
@@ -153,7 +246,7 @@ void mqttConnect() {
       // Once connected, publish an announcement...
       //mqttClient.publish("homebridge/from/connected", strClientName.c_str());
 
-      /* Once connected, add Sensor
+      /* Once connected, add Accessory
           void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService);
           void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService, String strCharacteristcs);
       */
@@ -181,7 +274,7 @@ void callback(char* topic, byte * payload, unsigned int length) {
 
   String strInPayLoad, strInTopic;
   int Tempb;
-  //Serial.print("[");
+  Serial.print("[");
   Serial.print(topic);
   strInTopic = String(topic);
   Serial.print("] ");
@@ -201,6 +294,7 @@ void callback(char* topic, byte * payload, unsigned int length) {
   if (strInTopic.indexOf(String("from/set")) > 0 ) {
     String strName = root["name"];
 
+    
 
   } // End Topic FromSet
 
@@ -212,20 +306,5 @@ void callback(char* topic, byte * payload, unsigned int length) {
   LED_status.on();
 }
 
-//========== Functions
 
-
-void WiFiConnect() {
-  Serial.println();
-  Serial.println("Waitting to connect...");
-  while ( WiFi.status() != WL_CONNECTED)  {
-    LED_status.blink(3);
-    Serial.print(".");
-    delay(1000);
-
-  }
-  Serial.println();
-  Serial.println("You're connected to the network");
-  LED_status.on();
-}
 
