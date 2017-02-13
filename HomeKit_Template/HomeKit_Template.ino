@@ -23,16 +23,16 @@ IPAddress server(192, 168, 1, 50);
 String strClientName = "ESP8266";
 
 
-#define pinLED 2
-#define pinButton 3
-#define pinGPIO 0
+#define pinLED 13
+#define pinButton 0
+#define pinGPIO 12
 
 /*
    Most of the time, no need to touch below settings.
 */
 
 //Var for interval timmer
-#define INTERVAL_KEEPALIVE 500
+#define INTERVAL_KEEPALIVE 5000
 #define INTERVAL_PUBLISH 5000
 
 //MQTT Topics
@@ -42,7 +42,7 @@ String strTopicToGet = "homebridge/to/get";
 String strTopicFrSet = "homebridge/from/set";
 
 //Homekit Service
-String strSwitch = "LightBulb";
+String strSwitch = "Switch";
 
 // Other useful global var.
 unsigned long time_interval, time_check;
@@ -51,19 +51,33 @@ unsigned long buttonHold = 0;
 int buttonState = 0;
 int buttonState_pre = 0;
 String strClientMAC;
+String strDeviceName;
+int PressTicCount = 0;
+int PressTicSwitch = 0;
+int PressTicStatus = 0;
+int PressHold = 0;
+
+float STATUS_NOWIFI = 2;
+float STATUS_HOLD4 = 0.2;
+float STATUS_PORTAL = 0.5;
+
 
 
 
 // ========== General Initial settings
 
-LED LED_status(pinLED);        // GPIO 2, LED pin, invert with ESP8266 onboard LED.
-BUTTON Button_press(pinButton);   // GPIO 3, using RX pin, required  SERIAL_TX_ONLY Only.
+LED LED_status(pinLED);        // LED pin, invert with ESP8266 onboard LED.
+BUTTON Button_press(pinButton);   //  using RX pin, required  SERIAL_TX_ONLY Only.
+
+SWITCH relay(pinGPIO);
 
 // Initialize the Ethernet client object
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+WiFiManager wifiManager;
 Ticker ticLED;
-Ticker ticPublish;
+Ticker ticPressCount;
+Ticker ticPressHold;
 
 
 // =========== Main Program===========
@@ -77,15 +91,10 @@ void setup() {
   //Serial.setDebugOutput(true);
 
   LED_status.on();
+  ticLED.attach(STATUS_NOWIFI, ticCallLED);
 
-  ticLED.attach(0.6, ticCallLED);
-  WiFiManager wifiManager;
+  relay.off();
 
-  //reset settings - if button pressed
-  if (Button_press.status() == LOW  ) {
-    wifiManager.resetSettings();
-    Serial.println("Call SmartConfig");
-  }
 
   //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
   wifiManager.setAPCallback(configModeCallback);
@@ -93,24 +102,8 @@ void setup() {
   //sets timeout until configuration portal gets turned off
   //useful to make it all retry or go to sleep
   //in seconds
-  wifiManager.setTimeout(180);
+  wifiManager.setTimeout(120);
 
-  //fetches ssid and pass and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //here  "AutoConnectAP"
-  //and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect()) {
-    Serial.println("failed to connect and hit timeout");
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(1000);
-  }
-
-  //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
-  ticLED.detach();
-  //keep LED on
-  LED_status.on();
 
   byte mac[6];
   WiFi.macAddress(mac);
@@ -124,67 +117,117 @@ void setup() {
 
   Serial.println();
 
-  /*  Output for Sensor Device Name
-    Serial.println(strSensorTemp + "_" + strClientMAC);
-    Serial.println(strSensorHumi + "_" + strClientMAC);
-  */
-  Serial.println(strSwitch + "_" + strClientMAC);
-
   time_interval_pub = INTERVAL_PUBLISH;
   time_interval = INTERVAL_KEEPALIVE;
+  strDeviceName = strSwitch + "_" + strClientMAC;
+
+  Serial.println(strDeviceName);
+  Serial.println("Setup Completed");
+
+
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFiConnect();
-  }
 
-  // Interval for KEEPALIVE and READY
-  if ((millis() - time_check) > time_interval) {
-    time_check = millis();
-    if (!mqttClient.connected()) {
-      Serial.println("Disconnected");
-      mqttConnect();
+  /*if (PressTicSwitch != 0) {
+    //Serial.print("ButtonPressCount:");
+    //Serial.println(PressTicSwitch);
+    ticPressCount.detach();
+    //Serial.println("PressCount Detached");
+
+    switch (PressTicSwitch) {
+      case 6:
+        if (!wifiManager.startConfigPortal(strDeviceName.c_str())) {
+          //Serial.println("failed to connect and hit timeout");
+        }
+        ticLED.attach(0.6, ticCallLED);
+        break;
+      case 8:
+        ESP.reset();
+        break;
     }
-  }
 
-  // Interval for publish
-  if ((millis() - time_check_pub) > time_interval_pub) {
-    time_check_pub = millis();
-    LED_status.off();
+    // Reset Counters
+    PressTicSwitch = 0;
+    PressTicCount = 0;
 
-    LED_status.on();
-  }
+
+    }*/
 
   buttonState = Button_press.status();
   if (buttonState == LOW && buttonState_pre == 0) {
-    Serial.println("ButtonPrss");
-    delay(30);
-    buttonState_pre = 1;
-    buttonHold = millis();
     LED_status.off();
+    //Serial.println("ButtonPrss");
+    relay.invert();
+    pub_SwitchStatus(strTopicToSet, strSwitch + "_" + strClientMAC, relay);
+    buttonState_pre = 1;
+
+
+    /* if (PressTicStatus == 0) {
+       PressTicStatus = 1;
+       ticPressCount.attach(1.5, ticCallPressCount);
+       //Serial.println("PressCount Attached");
+      }
+      PressTicCount++;*/
+
+    ticPressHold.attach(1, ticCallPressHold);
 
   }
-  /*   Button Long press
-    else if (buttonState == LOW && buttonState_pre == 1) {
-    if ((millis() - buttonHold) > 3000) {                 // Button Hold for 3 second,
-      Serial.println("SmartStart");                     // Disconnect wifi and wait for ESPTouch
-      WiFi.disconnect();
-      delay(500);
-      WiFi.beginSmartConfig();
-      delay(500);
-      //status = WiFi.status();
-    }
-    }
-  */
+
+
   if (buttonState == HIGH && buttonState_pre == 1) {  // Button Release
-    Serial.println("ButtonRelease");
+    // Serial.println("ButtonRelease");
     LED_status.on();
+    ticPressHold.detach();
+    //Serial.print("Button Hold for:");
+    //Serial.println(PressHold);
+
+    if (PressHold >= 4 && PressHold < 8) {
+      if (!wifiManager.startConfigPortal(strDeviceName.c_str())) {
+        Serial.println("failed to connect and hit timeout");
+      }
+      ticLED.attach(STATUS_NOWIFI, ticCallLED);
+    }
+    if (PressHold >= 8) {
+      ESP.reset();
+    }
+
+
+
     buttonState_pre = 0;
     buttonHold = 0;
+    PressHold = 0;
   }
 
-  mqttClient.loop();
+
+
+  if (WiFi.status() == WL_CONNECTED) {   // If Wifi connected, proceed with
+
+    if (buttonState_pre == 0) { // If button not holding. Stop LED blinking.
+      ticLED.detach();
+      LED_status.on();
+    }
+
+    if ((millis() - time_check) > time_interval) {
+      time_check = millis();
+      if (!mqttClient.connected()) {
+        Serial.println("Disconnected");
+        mqttConnect();
+      }
+    }
+
+    // Interval for publish
+    if ((millis() - time_check_pub) > time_interval_pub) {
+      time_check_pub = millis();
+      LED_status.off();
+
+      LED_status.on();
+    }
+
+
+    mqttClient.loop();
+  }
+
 }
 
 /*
@@ -192,22 +235,6 @@ void loop() {
 
 */
 
-void WiFiConnect() {
-  ticLED.attach(0.6, ticCallLED);
-  Serial.println();
-  Serial.println("Waitting to connect...");
-  while ( WiFi.status() != WL_CONNECTED)  {
-    //LED_status.blink(3);
-    Serial.print(".");
-    delay(1000);
-
-  }
-  Serial.println();
-  Serial.println("You're connected to the network");
-  ticLED.detach();
-  //keep LED on
-  LED_status.on();
-}
 
 //gets called when WiFiManager enters configuration mode
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -217,7 +244,7 @@ void configModeCallback (WiFiManager *myWiFiManager) {
   //if you used auto generated SSID, print it
   Serial.println(myWiFiManager->getConfigPortalSSID());
   //entered config mode, make led toggle faster
-  ticLED.attach(0.2, ticCallLED);
+  ticLED.attach(STATUS_PORTAL, ticCallLED);
 }
 
 
@@ -227,13 +254,23 @@ void configModeCallback (WiFiManager *myWiFiManager) {
    Blocking function prohibted.
    e.g. delay();
 */
-void ticCallLED()
-{
+void ticCallLED() {
   //toggle state
   int state = digitalRead(pinLED);  // get the current state of GPIO1 pin
   digitalWrite(pinLED, !state);     // set pin to the opposite state
 }
 
+void ticCallPressCount() {
+  PressTicSwitch = PressTicCount;
+  PressTicStatus = 0;
+}
+
+void ticCallPressHold() {
+  PressHold++;
+  if (PressHold >= 4) {
+    ticLED.attach(STATUS_HOLD4, ticCallLED);
+  }
+}
 
 
 /*
@@ -248,41 +285,41 @@ void mqttConnect() {
   // Loop until we're reconnected
   Serial.println("Attempting MQTT connection...");
   String ClientName = strClientName + "_" + strClientMAC;
-  while (!mqttClient.connected()) {
-    Serial.print(".");
-    // Attempt to connect, just a name to identify the client
-    if (mqttClient.connect(ClientName.c_str())) {
-      Serial.println();
-      Serial.println("connected");
+  //while (!mqttClient.connected()) {
+  // Serial.print(".");
+  // Attempt to connect, just a name to identify the client
+  if (mqttClient.connect(ClientName.c_str())) {
+    Serial.println();
+    Serial.println("connected");
 
-      // Once connected, publish an announcement...
-      //mqttClient.publish("homebridge/from/connected", strClientName.c_str());
+    // Once connected, publish an announcement...
+    //mqttClient.publish("homebridge/from/connected", strClientName.c_str());
 
-      /* Once connected, add Accessory
-          void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService);
-          void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService, String strCharacteristcs);
-      */
+    /* Once connected, add Accessory
+        void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService);
+        void AddService(PubSubClient mqttClient, String strTopic, String strName, String strService, String strCharacteristcs);
+    */
 
-      //AddService(mqttClient, strTopicToAdd, strSwitch + "_" + strClientMAC, "Lightbulb" , "Brightness,Hue,Saturation" );
+    //AddService(mqttClient, strTopicToAdd, strSwitch + "_" + strClientMAC, "Lightbulb" , "Brightness,Hue,Saturation" );
+    AddService(mqttClient, strTopicToAdd, strDeviceName, "Switch");
 
-      // Subscribe to channel
-      mqttClient.subscribe(strTopicFrSet.c_str());
 
-      //Serial.println("Subscribed");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
+    // Subscribe to channel
+    mqttClient.subscribe(strTopicFrSet.c_str());
+
+    //Serial.println("Subscribed");
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(mqttClient.state());
+
   }
+  //}
   Serial.println();
 }
 
 
 void callback(char* topic, byte * payload, unsigned int length) {
-  LED_status.off();
+
 
   String strInPayLoad, strInTopic;
   int Tempb;
@@ -305,9 +342,20 @@ void callback(char* topic, byte * payload, unsigned int length) {
 
   if (strInTopic.indexOf(String("from/set")) > 0 ) {
     String strName = root["name"];
+    if (strName == strDeviceName ) {
+      LED_status.off();
+      String strChar = root["characteristic"];
+      boolean bolVal = root["value"];
 
-    
+      if (strChar == String("On") && bolVal == 0) {
+        relay.off();
+      }
+      else if (strChar == String("On") && bolVal == 1) {
+        relay.on();
+      }
+    }
 
+    LED_status.on();
   } // End Topic FromSet
 
   // Topic from Respoinse
@@ -315,7 +363,27 @@ void callback(char* topic, byte * payload, unsigned int length) {
 
   } // End Topic Response
 
-  LED_status.on();
+
+}
+
+void pub_SwitchStatus(String strSetTopic, String strButtonName, SWITCH _switch ) {
+
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject();
+  root["name"] = strButtonName;
+  root["characteristic"] = "On";
+  root["value"] = _switch.status();
+
+  String strJSON;
+  root.printTo(strJSON);
+
+  Serial.print("[");
+  Serial.print(strSetTopic);
+  Serial.print("] ");
+  Serial.println(strJSON);
+
+  mqttClient.publish(strSetTopic.c_str(), strJSON.c_str());
+  mqttClient.loop();
 }
 
 

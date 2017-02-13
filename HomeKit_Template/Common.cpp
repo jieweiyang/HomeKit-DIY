@@ -119,12 +119,8 @@ boolean SWITCH::status() {
 
 void SWITCH::invert() {
   int bolStatusCurrent = digitalRead(_pin);
-  if (bolStatusCurrent == HIGH) {
-    digitalWrite(_pin, LOW);
-  }
-  else {
-    digitalWrite(_pin, HIGH);
-  }
+    digitalWrite(_pin, !bolStatusCurrent);
+
 }
 
 void SWITCH::on() {
