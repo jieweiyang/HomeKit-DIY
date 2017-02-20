@@ -1,6 +1,7 @@
 
 
 //Mandatory Library
+#include <EEPROM.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <ESP8266WiFi.h>
@@ -52,6 +53,8 @@ int buttonState = 0;
 int buttonState_pre = 0;
 String strClientMAC;
 String strDeviceName;
+String strMQTTServer;
+char chaTemp[20];
 int PressTicCount = 0;
 int PressTicSwitch = 0;
 int PressTicStatus = 0;
@@ -75,6 +78,8 @@ SWITCH relay(pinGPIO);
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 WiFiManager wifiManager;
+WiFiManagerParameter mqtt_server("server", "MQTT Server", "192.168.1.50", 40);
+
 Ticker ticLED;
 Ticker ticPressCount;
 Ticker ticPressHold;
@@ -87,23 +92,15 @@ void setup() {
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
 
   WiFi.begin();
-  //WiFi.printDiag(Serial);
-  //Serial.setDebugOutput(true);
+  EEPROM.begin(20);
 
   LED_status.on();
+  relay.off();
   ticLED.attach(STATUS_NOWIFI, ticCallLED);
 
-  relay.off();
-
-
-  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
   wifiManager.setAPCallback(configModeCallback);
-
-  //sets timeout until configuration portal gets turned off
-  //useful to make it all retry or go to sleep
-  //in seconds
   wifiManager.setTimeout(120);
-
+  wifiManager.addParameter(&mqtt_server);
 
   byte mac[6];
   WiFi.macAddress(mac);
@@ -112,10 +109,20 @@ void setup() {
           mac[1], mac[2], mac[3], mac[4], mac[5]);
   strClientMAC = (String(str));
 
-  mqttClient.setServer(server, 1883);
+  int intEEPLength = EEPROM.read(0);
+  String strMQTTServer;
+  if (intEEPLength != 0) {
+    for (int i = 1; i <= intEEPLength; i++) {
+      strMQTTServer += char(EEPROM.read(i));
+    }
+  }
+  Serial.print("Readingfrom EEPROM:");
+  Serial.println(strMQTTServer);
+  strMQTTServer.toCharArray(chaTemp,15);
+
+  mqttClient.setServer(chaTemp, 1883);
   mqttClient.setCallback(callback);
 
-  Serial.println();
 
   time_interval_pub = INTERVAL_PUBLISH;
   time_interval = INTERVAL_KEEPALIVE;
@@ -157,8 +164,7 @@ void loop() {
   buttonState = Button_press.status();
   if (buttonState == LOW && buttonState_pre == 0) {
     LED_status.off();
-    //Serial.println("ButtonPrss");
-    relay.invert();
+
     pub_SwitchStatus(strTopicToSet, strSwitch + "_" + strClientMAC, relay);
     buttonState_pre = 1;
 
@@ -177,6 +183,11 @@ void loop() {
 
   if (buttonState == HIGH && buttonState_pre == 1) {  // Button Release
     // Serial.println("ButtonRelease");
+    //Serial.println("ButtonPrss");
+    if (PressHold < 1) {  // ShorPress
+      relay.invert();
+    }
+
     LED_status.on();
     ticPressHold.detach();
     //Serial.print("Button Hold for:");
@@ -185,14 +196,27 @@ void loop() {
     if (PressHold >= 4 && PressHold < 8) {
       if (!wifiManager.startConfigPortal(strDeviceName.c_str())) {
         Serial.println("failed to connect and hit timeout");
+        ticLED.attach(STATUS_NOWIFI, ticCallLED);
       }
-      ticLED.attach(STATUS_NOWIFI, ticCallLED);
+      else {
+        Serial.print("Get MQTT Addr:");
+        Serial.println(mqtt_server.getValue());
+
+        strMQTTServer = String(mqtt_server.getValue());
+
+        EEPROM.write(0, strMQTTServer.length());
+        for (int i = 1; i <= strMQTTServer.length(); i++) {
+          EEPROM.write(i, strMQTTServer.charAt(i - 1));
+        }
+        EEPROM.commit();
+        Serial.println("MQTT Server saved");
+        ESP.reset();
+
+      }
     }
     if (PressHold >= 8) {
       ESP.reset();
     }
-
-
 
     buttonState_pre = 0;
     buttonHold = 0;
